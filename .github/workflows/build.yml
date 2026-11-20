@@ -1,0 +1,151 @@
+name: build
+on: [push, workflow_dispatch]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.14
+      - name: Create project files
+        run: |
+          mkdir -p src/main/java/com/ownerdupe src/main/resources
+          cat > settings.gradle <<'EOF'
+          pluginManagement {
+              repositories {
+                  maven { url = 'https://maven.fabricmc.net/' }
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          rootProject.name = 'ownerdupe'
+          EOF
+          cat > gradle.properties <<'EOF'
+          org.gradle.jvmargs=-Xmx2G
+          minecraft_version=1.21.8
+          yarn_mappings=1.21.8+build.1
+          loader_version=0.16.14
+          fabric_version=0.129.0+1.21.8
+          mod_version=1.0.0
+          maven_group=com.ownerdupe
+          archives_base_name=ownerdupe
+          EOF
+          cat > build.gradle <<'EOF'
+          plugins {
+              id 'fabric-loom' version '1.11-SNAPSHOT'
+          }
+          version = project.mod_version
+          group = project.maven_group
+          base {
+              archivesName = project.archives_base_name
+          }
+          dependencies {
+              minecraft "com.mojang:minecraft:${project.minecraft_version}"
+              mappings "net.fabricmc:yarn:${project.yarn_mappings}:v2"
+              modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
+              modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
+          }
+          processResources {
+              inputs.property "version", project.version
+              filesMatching("fabric.mod.json") {
+                  expand "version": inputs.properties.version
+              }
+          }
+          tasks.withType(JavaCompile).configureEach {
+              it.options.release = 21
+              it.options.encoding = 'UTF-8'
+          }
+          java {
+              sourceCompatibility = JavaVersion.VERSION_21
+              targetCompatibility = JavaVersion.VERSION_21
+          }
+          EOF
+          cat > src/main/resources/fabric.mod.json <<'EOF'
+          {
+            "schemaVersion": 1,
+            "id": "ownerdupe",
+            "version": "${version}",
+            "name": "OwnerDupe",
+            "description": "Adds /dupe, usable only by SmoothSightKillz.",
+            "authors": ["SmoothSightKillz"],
+            "license": "MIT",
+            "environment": "*",
+            "entrypoints": { "main": ["com.ownerdupe.OwnerDupe"] },
+            "depends": {
+              "fabricloader": ">=0.16.14",
+              "minecraft": "~1.21.8",
+              "java": ">=21",
+              "fabric-api": "*"
+            }
+          }
+          EOF
+          cat > src/main/java/com/ownerdupe/OwnerDupe.java <<'EOF'
+          package com.ownerdupe;
+
+          import com.mojang.brigadier.arguments.IntegerArgumentType;
+          import com.mojang.brigadier.context.CommandContext;
+          import net.fabricmc.api.ModInitializer;
+          import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
+          import net.minecraft.entity.Entity;
+          import net.minecraft.item.ItemStack;
+          import net.minecraft.server.command.CommandManager;
+          import net.minecraft.server.command.ServerCommandSource;
+          import net.minecraft.server.network.ServerPlayerEntity;
+          import net.minecraft.text.Text;
+
+          public class OwnerDupe implements ModInitializer {
+              private static final String OWNER_NAME = "SmoothSightKillz";
+              private static final String DENIED = "You are not authorized to use OwnerDupe.";
+              private static final int MAX_AMOUNT = 2304;
+
+              @Override
+              public void onInitialize() {
+                  CommandRegistrationCallback.EVENT.register((dispatcher, registryAccess, environment) ->
+                      dispatcher.register(
+                          CommandManager.literal("dupe")
+                              .executes(ctx -> execute(ctx, 1))
+                              .then(CommandManager.argument("amount", IntegerArgumentType.integer(1, MAX_AMOUNT))
+                                  .executes(ctx -> execute(ctx, IntegerArgumentType.getInteger(ctx, "amount"))))
+                      )
+                  );
+              }
+
+              private static int execute(CommandContext<ServerCommandSource> ctx, int amount) {
+                  ServerCommandSource source = ctx.getSource();
+                  Entity entity = source.getEntity();
+                  if (!(entity instanceof ServerPlayerEntity player)
+                          || !OWNER_NAME.equals(player.getName().getString())) {
+                      source.sendError(Text.literal(DENIED));
+                      return 0;
+                  }
+                  ItemStack held = player.getMainHandStack();
+                  if (held.isEmpty()) {
+                      source.sendError(Text.literal("Hold an item in your main hand to duplicate it."));
+                      return 0;
+                  }
+                  int remaining = amount;
+                  int maxStack = held.getMaxCount();
+                  while (remaining > 0) {
+                      int count = Math.min(remaining, maxStack);
+                      ItemStack copy = held.copyWithCount(count);
+                      player.getInventory().insertStack(copy);
+                      if (!copy.isEmpty()) {
+                          player.dropItem(copy, false);
+                      }
+                      remaining -= count;
+                  }
+                  final int given = amount;
+                  source.sendFeedback(() -> Text.literal("Duplicated " + given + " item(s)."), false);
+                  return given;
+              }
+          }
+          EOF
+      - run: gradle build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ownerdupe
+          path: build/libs/ownerdupe-1.0.0.jar
